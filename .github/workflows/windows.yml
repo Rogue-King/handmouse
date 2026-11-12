@@ -1,0 +1,38 @@
+name: Windows packaging
+
+on: [push, pull_request, workflow_dispatch]
+
+jobs:
+  test:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        python: ['3.11', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Install with uv-managed Python
+        run: uv sync --locked --managed-python --python ${{ matrix.python }}
+      - name: Unit tests
+        run: |
+          uv run --no-sync --python ${{ matrix.python }} python -m unittest discover -s tests -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          uv run --no-sync --python ${{ matrix.python }} python test_protocol.py
+      - name: Build and install wheel
+        run: |
+          uv build --python ${{ matrix.python }}
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          uv venv --managed-python --python ${{ matrix.python }} wheel-test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $wheel = (Get-ChildItem dist\*.whl).FullName
+          uv pip install --python wheel-test\Scripts\python.exe $wheel
+          exit $LASTEXITCODE
+      - name: Verify native dependencies and entrypoint outside checkout
+        run: |
+          $python = Join-Path $PWD 'wheel-test\Scripts\python.exe'
+          $tracker = Join-Path $PWD 'wheel-test\Scripts\handmouse-track.exe'
+          Set-Location $env:RUNNER_TEMP
+          & $python -c "import cv2, mediapipe, numpy, pyautogui, screeninfo, tkinter, gestures, handmouse_gui; import subprocess; from handmouse_runtime import ffmpeg_exe; r = subprocess.run([ffmpeg_exe(), '-devices'], capture_output=True, text=True, timeout=20); assert r.returncode == 0, r.stderr; assert 'dshow' in r.stdout + r.stderr, 'Bundled FFmpeg lacks DirectShow'; print('Native imports and DirectShow OK')"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $tracker --help
+          exit $LASTEXITCODE

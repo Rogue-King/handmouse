@@ -1,52 +1,61 @@
 # handmouse
 
-Control your mouse with your hand using a webcam. No special hardware needed.
+Control your Windows mouse with your hand using a webcam. No special camera needed.
+Fork of [AidenMoyer/handmouse](https://github.com/AidenMoyer/handmouse), with portable uv installation.
 
-## Quick install (Windows)
+## Install and run (Windows)
 
-**Before you start**, make sure these are installed:
-- **WSL (Windows Subsystem for Linux)** — open PowerShell as Administrator and run: `wsl --install`, then restart
-- **Git** — download from [git-scm.com](https://git-scm.com/download/win) or run: `winget install Git.Git`
+Requires **64-bit Windows 10/11**, a webcam, and [uv](https://docs.astral.sh/uv/getting-started/installation/).
+No WSL, system FFmpeg, winget, administrator access, or separate pip setup is needed.
+Use uv-managed Python to get a matching interpreter with Tkinter.
 
-Then open a regular (non-admin) **PowerShell** window and run:
+Download this repository as a ZIP and extract it, or clone it with Git:
 
 ```powershell
-# 1. Allow PowerShell scripts to run (only needed once per machine)
-Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
-
-# 2. Clone the repo and run setup
-git clone https://github.com/AidenMoyer/handmouse
+git clone https://github.com/Rogue-King/handmouse.git
 cd handmouse
-.\setup_windows.ps1
+uv sync --managed-python
+uv run handmouse
 ```
 
-The setup script handles everything else:
-- Installs Python 3.11 if missing (via winget)
-- Installs Git if missing (via winget)
-- Installs ffmpeg if missing (via winget)
-- Installs the Visual C++ runtime (required by mediapipe / opencv)
-- Creates a Python virtual environment and installs all packages
-- Downloads the MediaPipe hand-landmarker model (~8 MB)
-- Creates a **handmouse** shortcut on your Desktop
+`uv` installs Python 3.11 and the dependencies declared in `pyproject.toml`.
+FFmpeg is supplied by the `imageio-ffmpeg` wheel; the Windows C++ runtime DLLs
+are supplied by `msvc-runtime`. There are no hard-coded user or installation paths.
+The MediaPipe hand model (~8 MB) downloads automatically when tracking starts,
+with SHA-256 verification. Internet access is required for installation and the
+first tracking session; the model is cached for later offline use.
 
-After setup, double-click the **handmouse** shortcut on your Desktop to open the control panel.
+The project targets Windows x64; it does not add Linux, WSL, macOS, or native ARM64 support.
+Moving the source folder is fine: run `uv sync --managed-python` at the destination
+to recreate the environment. Virtual environments themselves are not relocatable.
 
----
+### Install as a standalone command
 
-## Requirements
+From an extracted checkout, install with:
 
-| Requirement | Notes |
-|---|---|
-| Windows 10 21H2+ or Windows 11 | winget must be available |
-| A webcam | Any USB or built-in camera |
-| Python 3.9–3.12 | Auto-installed if missing |
-| ffmpeg | Auto-installed if missing |
+```powershell
+uv tool install --python 3.11 --managed-python .
+handmouse
+```
 
-> **GPU acceleration** is listed in the settings but has no effect — the standard
-> `pip install mediapipe` on Windows is compiled without GPU support.
-> The app runs on CPU+XNNPACK (multi-threaded) which is fast enough for real-time use.
+This installs a wheel into uv's tool environment; the checkout is no longer needed.
+If `handmouse` is not on PATH, run `uv tool update-shell` and reopen PowerShell.
+Developers can build a distributable wheel with `uv build`; recipients install it
+with `uv tool install --python 3.11 --managed-python .\dist\handmouse-0.1.0-py3-none-any.whl`.
 
----
+### Command line
+
+```powershell
+uv run handmouse-track --list
+uv run handmouse-track --camera "USB Camera" --show
+uv run handmouse-track --help
+```
+
+Without `--camera`, the first detected camera is selected. An installed tool also
+provides `handmouse-track` directly. The old `handmouse_win.bat` and
+`setup_windows.ps1` are compatibility wrappers around uv; setup no longer changes
+system settings or creates a Desktop shortcut. Legacy relay scripts are not part
+of the installed application.
 
 ## Gestures
 
@@ -61,51 +70,61 @@ After setup, double-click the **handmouse** shortcut on your Desktop to open the
 
 **Tracking modes** (selectable in the GUI):
 
-- **Relative (trackpad)** *(default)* — works like a trackpad. Fist to pause, open hand to resume from the same spot. Cursor moves freely across all monitors.
+- **Relative (trackpad)** *(default)* — fist to pause, open hand to resume from the same spot. Cursor moves freely across all monitors.
 - **Absolute** — hand position in the camera frame maps directly to the selected monitor.
 
----
+Overhead cameras and palm-down gestures are **not hardware-validated**. Keep fingers
+visible and enable the preview to check tracking; do not assume desk-resting pinches
+will be detected reliably.
 
-## Settings
+## Settings and resources
 
-All settings are saved automatically in `settings.json` next to the scripts and restored on next launch.
+Settings and the downloaded model live in `%LOCALAPPDATA%\handmouse`, not beside
+the installed scripts. A source checkout's existing `settings.json` is read as a
+fallback and saved to the new location when settings change; the original is not deleted.
+Settings survive upgrades and can be shared between source and tool installations.
 
 | Setting | Description |
 |---|---|
 | Camera | Which webcam to use |
 | Control monitor | Which monitor to control (absolute mode only) |
-| Resolution | Camera capture resolution (higher = more CPU; inference always runs at 640×480) |
+| Resolution | Camera capture resolution (higher = more CPU; inference uses at most 640×480) |
 | FPS | Camera frame rate |
-| Track hand | Which hand to track — any, left, or right |
+| Track hand | Any, left, or right |
 | Tracking mode | Relative (trackpad) or Absolute |
-| Sensitivity | How much cursor movement per hand movement |
-| Mirror | Flip camera so left/right match your perspective |
+| Sensitivity | Cursor movement per hand movement |
+| Scroll speed | Scroll movement multiplier |
+| Mirror | Flip horizontal movement to match your perspective |
 | Preview window | Show camera feed with landmark overlay |
 
----
+The standard MediaPipe Windows wheel runs on CPU+XNNPACK; selecting GPU may fall
+back to CPU. A GPU is not required.
 
 ## Troubleshooting
 
-**"setup_windows.ps1 is not recognized" or "running scripts is disabled"**
-PowerShell's default security policy blocks `.ps1` files. Run this once first, then try again:
+- **No cameras / no frames:** Enable camera access for desktop apps in Windows
+  Settings, close other applications using the webcam, refresh the camera list,
+  and try 640×480 at 30 FPS. `handmouse-track --list` lists device names.
+- **FFmpeg/DirectShow error:** Unset `IMAGEIO_FFMPEG_EXE` to use the bundled build.
+  If needed, set it to an alternate FFmpeg executable with DirectShow support.
+- **Tkinter missing:** Recreate the environment with `uv sync --managed-python`
+  using the pinned Python 3.11 instead of a stripped-down system Python.
+- **Model download failed:** Check your connection/proxy and retry. A bad or
+  incomplete download is never installed. The next launch retries automatically.
+- **Cursor drift:** Lower sensitivity; high sensitivity amplifies tracking noise.
+- **Hand not detected:** Improve lighting and contrast; keep the whole hand visible.
+- **Scroll not working:** Pinch thumb + middle finger. The closest fingertip wins,
+  so avoid bringing adjacent fingers close to the thumb.
+
+## Development checks
+
 ```powershell
-Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+uv sync --locked --managed-python
+uv run python -m unittest discover -s tests -v
+uv run python test_protocol.py
+uv build
 ```
 
-**"repository not found" when cloning**
-Make sure you use the exact URL: `https://github.com/AidenMoyer/handmouse` — note the username is **AidenMoyer**, not the email address.
-
-**"No frames — check device name with --list"**
-The camera name in settings doesn't match what Windows sees. Hit **↻ Refresh cameras & monitors** in the GUI, then re-select your camera from the dropdown.
-
-**"tkinter not found"**
-Your Python was installed from the Microsoft Store — it strips tkinter. Uninstall it and reinstall Python from [python.org](https://python.org), making sure to check **tcl/tk and IDLE** during setup.
-
-**Cursor drifts when hand is still**
-Lower the sensitivity slider. The dead zone already filters sub-pixel noise; very high sensitivity amplifies any residual motion.
-
-**Hand not detected**
-Make sure you're in good lighting. The hand should be clearly visible against the background. Try moving the camera or adjusting your position.
-
-**Scroll not working**
-Use a thumb + middle finger pinch. Make sure your middle finger is the closest fingertip to your thumb (the app picks the nearest finger to avoid false triggers from adjacent fingers).
+The Windows CI workflow checks Python 3.11/3.12, native dependency imports,
+bundled DirectShow support, unit tests, and wheel installation from outside the checkout.
+Real camera accuracy, latency, and overhead positioning still need manual testing.

@@ -1,5 +1,2 @@
-mediapipe>=1.0.1
-opencv-python>=4.9.0.80
-numpy>=1.26
-pyautogui>=0.9.54
-screeninfo>=0.8.1
+# Compatibility for pip users; pyproject.toml is the dependency source of truth.
+-e .

@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "handmouse"
+version = "0.1.0"
+description = "Windows-native webcam hand tracking mouse controller"
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+classifiers = ["Operating System :: Microsoft :: Windows"]
+dependencies = [
+    "mediapipe>=1.0.1,<2",
+    "opencv-contrib-python>=4.9.0.80,<5",
+    "numpy>=1.26,<3",
+    "pyautogui>=0.9.54,<1",
+    "screeninfo>=0.8.1,<1",
+    "imageio-ffmpeg>=0.6,<1",
+    "msvc-runtime>=14.40; sys_platform == 'win32'",
+]
+
+[project.scripts]
+handmouse = "handmouse_runtime:gui"
+handmouse-track = "handmouse_runtime:track"
+
+[tool.uv]
+required-environments = [
+    "sys_platform == 'win32' and python_version == '3.11'",
+    "sys_platform == 'win32' and python_version == '3.12'",
+]
+
+[tool.setuptools]
+py-modules = ["handmouse_runtime", "handmouse_gui", "handmouse_win", "gestures"]

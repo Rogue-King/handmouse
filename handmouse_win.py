@@ -13,7 +13,7 @@ Usage:
     python handmouse_win.py [options]
 
     --list              List cameras and monitors, then exit
-    --camera NAME       DShow device name (default: "1080P Pro Stream")
+    --camera NAME       DShow device name (default: first detected camera)
     --width / --height  Capture resolution (default 640x480)
     --fps N             Capture frame rate (default 30)
     --mirror            Flip camera horizontally (default on)
@@ -25,7 +25,6 @@ Usage:
 """
 
 import argparse
-import os
 import subprocess
 import sys
 import threading
@@ -40,11 +39,7 @@ from mediapipe.tasks.python import vision as mp_vision
 from screeninfo import get_monitors
 
 from gestures import classify, _palm_center
-
-# ── ffmpeg path (patched by setup_windows.ps1) ────────────────────────────────
-FFMPEG = r"C:\Users\TylerMass\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-9.0.1-full_build\bin\ffmpeg.exe"
-
-MODEL_PATH = os.path.join(os.path.dirname(__file__), "hand_landmarker.task")
+from handmouse_runtime import ensure_model, ffmpeg_exe, list_cameras
 
 pyautogui.FAILSAFE = False
 pyautogui.PAUSE = 0
@@ -88,7 +83,7 @@ class FFmpegCamera:
         self.height = height
         self.frame_bytes = width * height * 3
         cmd = [
-            FFMPEG,
+            ffmpeg_exe(),
             # low-latency flags: disable internal buffering so frames arrive in real-time
             "-fflags", "nobuffer",
             "-flags", "low_delay",
@@ -468,6 +463,7 @@ def build_hands(use_gpu: bool):
     reused across frames — IMAGE mode creates new threads per call and leaks them,
     causing the process to slow to a crawl and eventually crash with STATUS_TOO_MANY_THREADS.
     """
+    model_path = ensure_model()
     delegates = ([BaseOptions.Delegate.GPU, BaseOptions.Delegate.CPU]
                  if use_gpu else [BaseOptions.Delegate.CPU])
 
@@ -475,7 +471,7 @@ def build_hands(use_gpu: bool):
         try:
             opts = mp_vision.HandLandmarkerOptions(
                 base_options=BaseOptions(
-                    model_asset_path=MODEL_PATH,
+                    model_asset_path=model_path,
                     delegate=delegate,
                 ),
                 num_hands=2,
@@ -500,8 +496,7 @@ def build_hands(use_gpu: bool):
 
 def main():
     ap = argparse.ArgumentParser(description="handmouse — hand tracking mouse controller")
-    ap.add_argument("--camera", default="1080P Pro Stream",
-                    help="DShow device name")
+    ap.add_argument("--camera", help="DShow device name (default: first detected)")
     ap.add_argument("--width",  type=int, default=640)
     ap.add_argument("--height", type=int, default=480)
     ap.add_argument("--fps",    type=int, default=30)
@@ -527,20 +522,21 @@ def main():
 
     if args.list:
         print("── Cameras ──")
-        r = subprocess.run(
-            [FFMPEG, "-list_devices", "true", "-f", "dshow", "-i", "dummy"],
-            capture_output=True, text=True
-        )
-        import re
-        for name in re.findall(r'"([^"]+)"\s+\(video\)', r.stderr + r.stdout):
+        for name in list_cameras():
             print(f"  {name}")
         print("\n── Monitors ──")
         for i, m in enumerate(sorted_monitors()):
             print(f"  {monitor_label(i, m)}")
         return
 
+    if not args.camera:
+        cameras = list_cameras()
+        if not cameras:
+            ap.error("No cameras found. Enable camera access for desktop apps in Windows Settings.")
+        args.camera = cameras[0]
+
     monitors = sorted_monitors()
-    if args.monitor >= len(monitors):
+    if args.monitor < 0 or args.monitor >= len(monitors):
         print(f"Monitor {args.monitor} not found — only {len(monitors)} monitor(s) detected.")
         sys.exit(1)
     mon = monitors[args.monitor]
@@ -551,11 +547,11 @@ def main():
     print(f"Hand:    {args.hand}   Sensitivity: {args.sensitivity:.1f}×   Scroll: {args.scroll_speed:.1f}×   Mode: {args.mode}")
     print("Starting — Ctrl+C to stop")
 
+    hands = build_hands(args.gpu)
     cam  = FFmpegCamera(args.camera, args.width, args.height, args.fps)
     ctrl = MouseController(mon, args.width, args.height, args.mirror, args.sensitivity,
                            mode=args.mode, all_monitors=monitors,
                            scroll_speed=args.scroll_speed)
-    hands = build_hands(args.gpu)
 
     # wait for first frame
     print("Waiting for camera...", end="", flush=True)

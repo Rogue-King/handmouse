@@ -2,16 +2,15 @@
 
 import json
 import os
-import re
+import sys
 import subprocess
 import threading
 import tkinter as tk
 from tkinter import ttk, messagebox
 
-FFMPEG = r"C:\Users\TylerMass\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-9.0.1-full_build\bin\ffmpeg.exe"
-PYTHON  = os.path.join(os.path.dirname(__file__), "venv-win", "Scripts", "pythonw.exe")
-SCRIPT  = os.path.join(os.path.dirname(__file__), "handmouse_win.py")
-SETTINGS_FILE = os.path.join(os.path.dirname(__file__), "settings.json")
+from handmouse_runtime import data_dir, list_cameras as detect_cameras
+
+SETTINGS_FILE = data_dir() / "settings.json"
 
 RESOLUTIONS = [
     ("640 × 480  (VGA)",       "640",  "480"),
@@ -52,7 +51,10 @@ YELLOW = "#f9e2af"
 
 def load_settings() -> dict:
     try:
-        with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+        source = SETTINGS_FILE
+        if not source.exists():
+            source = os.path.join(os.path.dirname(__file__), "settings.json")
+        with open(source, "r", encoding="utf-8") as f:
             saved = json.load(f)
         # merge with defaults so new keys are always present
         return {**DEFAULTS, **saved}
@@ -62,24 +64,20 @@ def load_settings() -> dict:
 
 def save_settings(d: dict):
     try:
+        SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
         with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
             json.dump(d, f, indent=2)
-    except Exception:
-        pass
+    except OSError as exc:
+        messagebox.showwarning("Settings not saved", str(exc))
 
 
 # ── data fetchers ─────────────────────────────────────────────────────────────
 
 def list_cameras():
     try:
-        r = subprocess.run(
-            [FFMPEG, "-list_devices", "true", "-f", "dshow", "-i", "dummy"],
-            capture_output=True, text=True, timeout=8
-        )
-        names = re.findall(r'"([^"]+)"\s+\(video\)', r.stderr + r.stdout)
-        return names if names else ["1080P Pro Stream"]
-    except Exception:
-        return ["1080P Pro Stream"]
+        return detect_cameras()
+    except (OSError, RuntimeError, subprocess.TimeoutExpired):
+        return []
 
 
 def list_monitors():
@@ -335,7 +333,7 @@ class HandmouseGUI(tk.Tk):
         try:
             # camera — fall back to first detected if saved value not present
             cam = s.get("camera")
-            self._cam_var.set(cam if cam in self._cameras else self._cameras[0])
+            self._cam_var.set(cam if cam in self._cameras else next(iter(self._cameras), ""))
 
             mon = s.get("monitor")
             self._mon_var.set(mon if mon in self._monitors else self._monitors[0])
@@ -468,9 +466,14 @@ class HandmouseGUI(tk.Tk):
 
     def _start(self):
         w, h = self._res_wh()
-        py = PYTHON.replace("pythonw.exe", "python.exe")
+        if not self._cam_var.get():
+            messagebox.showerror("No camera", "No webcam detected. Check Windows camera permissions and refresh cameras.")
+            return
+        py = sys.executable
+        if py.lower().endswith("pythonw.exe"):
+            py = py[:-len("pythonw.exe")] + "python.exe"
         cmd = [
-            py, SCRIPT,
+            py, "-X", "utf8", "-u", "-m", "handmouse_win",
             "--camera",      self._cam_var.get(),
             "--width",       w,
             "--height",      h,
@@ -481,15 +484,15 @@ class HandmouseGUI(tk.Tk):
             "--scroll-speed", f"{self._scroll_var.get():.2f}",
             "--mode",         self._tracking_mode(),
         ]
-        if self._mirror_var.get(): cmd.append("--mirror")
+        cmd.append("--mirror" if self._mirror_var.get() else "--no-mirror")
         if self._show_var.get():   cmd.append("--show")
         if self._gpu_var.get():    cmd.append("--gpu")
 
-        self._log_append("$ " + " ".join(cmd[2:]) + "\n")
+        self._log_append("$ " + " ".join(cmd[5:]) + "\n")
         try:
             self._proc = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, cwd=os.path.dirname(SCRIPT)
+                encoding="utf-8", errors="replace"
             )
         except Exception as e:
             messagebox.showerror("Launch failed", str(e))
@@ -542,4 +545,5 @@ class HandmouseGUI(tk.Tk):
 
 
 if __name__ == "__main__":
-    HandmouseGUI().mainloop()
+    from handmouse_runtime import gui
+    gui()
