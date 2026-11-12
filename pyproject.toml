@@ -7,6 +7,7 @@ name = "handmouse"
 version = "0.1.0"
 description = "Windows-native webcam hand tracking mouse controller"
 readme = "README.md"
+license-files = ["licenses/*.txt"]
 requires-python = ">=3.11,<3.13"
 classifiers = ["Operating System :: Microsoft :: Windows"]
 dependencies = [
@@ -19,6 +20,9 @@ dependencies = [
     "msvc-runtime>=14.40; sys_platform == 'win32'",
 ]
 
+[project.optional-dependencies]
+intel = ["openvino>=2025,<2027"]
+
 [project.scripts]
 handmouse = "handmouse_runtime:gui"
 handmouse-track = "handmouse_runtime:track"
@@ -30,4 +34,4 @@ required-environments = [
 ]
 
 [tool.setuptools]
-py-modules = ["handmouse_runtime", "handmouse_gui", "handmouse_win", "gestures"]
+py-modules = ["handmouse_runtime", "handmouse_gui", "handmouse_win", "handmouse_camera", "handmouse_openvino", "gestures"]

@@ -6,8 +6,7 @@ for tracking, and pyautogui to control the Windows mouse. No WSL required.
 Features:
   - Multi-monitor: pick which display to control
   - Hand selection: track left hand, right hand, or whichever appears first
-  - GPU acceleration: tries MediaPipe GPU delegate (NVIDIA/AMD via OpenCL/DirectX),
-    falls back to CPU automatically
+  - Intel integrated GPU acceleration via optional OpenVINO backend
 
 Usage:
     python handmouse_win.py [options]
@@ -21,33 +20,28 @@ Usage:
     --monitor N         Which monitor to control (0 = primary, 1 = second, ...)
     --hand left|right|any  Which hand to track (default: any)
     --sensitivity N     Mouse sensitivity multiplier (default 1.0)
-    --gpu               Try GPU delegate for hand detection; falls back to CPU
+    --backend intel     Use Intel integrated graphics (requires the intel extra)
+    --stats             Print capture/inference timing every two seconds
 """
 
 import argparse
-import subprocess
 import sys
-import threading
 import time
 
 import cv2
 import mediapipe as mp
-import numpy as np
 import pyautogui
 from mediapipe.tasks.python import BaseOptions
 from mediapipe.tasks.python import vision as mp_vision
 from screeninfo import get_monitors
 
 from gestures import classify, _palm_center
-from handmouse_runtime import ensure_model, ffmpeg_exe, list_cameras
+from handmouse_runtime import ensure_model, list_cameras
+from handmouse_camera import FFmpegCamera
 
 pyautogui.FAILSAFE = False
 pyautogui.PAUSE = 0
 
-# MediaPipe was designed for ~640px input; anything larger wastes CPU and can
-# crash. Frames captured at higher resolution are downscaled to this before
-# inference — landmark coords are normalised so accuracy is unaffected.
-INFER_W, INFER_H = 640, 480
 
 
 # ── monitor helpers ───────────────────────────────────────────────────────────
@@ -75,80 +69,7 @@ class EMA:
         return self.val
 
 
-# ── ffmpeg camera reader ──────────────────────────────────────────────────────
 
-class FFmpegCamera:
-    def __init__(self, device_name, width, height, fps):
-        self.width = width
-        self.height = height
-        self.frame_bytes = width * height * 3
-        cmd = [
-            ffmpeg_exe(),
-            # low-latency flags: disable internal buffering so frames arrive in real-time
-            "-fflags", "nobuffer",
-            "-flags", "low_delay",
-            "-probesize", "32",
-            "-analyzeduration", "0",
-            "-loglevel", "quiet",
-            "-f", "dshow",
-            "-video_size", f"{width}x{height}",
-            "-framerate", str(fps),
-            "-i", f"video={device_name}",
-            "-f", "rawvideo",
-            "-pix_fmt", "bgr24",
-            # no output buffering either
-            "-flush_packets", "1",
-            "-",
-        ]
-        self._proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            bufsize=0,  # unbuffered pipe on our side too
-        )
-        self._frame = None
-        self._seq   = 0   # increments every time a new frame is stored
-        self._lock  = threading.Lock()
-        self._running = True
-        self._thread = threading.Thread(target=self._reader, daemon=True)
-        self._thread.start()
-
-    def _reader(self):
-        """Read ffmpeg output as fast as possible, always keeping only the latest frame.
-
-        If inference is slow and frames pile up in the OS pipe buffer, we drain
-        them all and only expose the newest one — this prevents lag from building up.
-        """
-        buf = bytearray()
-        while self._running:
-            chunk = self._proc.stdout.read(65536)
-            if not chunk:
-                break
-            buf.extend(chunk)
-            # consume ALL complete frames from the buffer, keeping only the last
-            while len(buf) >= self.frame_bytes:
-                raw = bytes(buf[:self.frame_bytes])
-                del buf[:self.frame_bytes]
-                frame = np.frombuffer(raw, dtype=np.uint8).reshape(
-                    (self.height, self.width, 3))
-                with self._lock:
-                    self._frame = frame
-                    self._seq  += 1
-
-    def read(self):
-        with self._lock:
-            if self._frame is None:
-                return False, None
-            return True, self._frame.copy()
-
-    def read_seq(self):
-        """Return (seq, frame) — caller can compare seq to detect a new frame."""
-        with self._lock:
-            if self._frame is None:
-                return 0, None
-            return self._seq, self._frame.copy()
-
-    def release(self):
-        self._running = False
-        self._proc.terminate()
 
 
 # ── mouse controller ──────────────────────────────────────────────────────────
@@ -514,8 +435,11 @@ def main():
     ap.add_argument("--mode", choices=["relative", "absolute"], default="relative",
                     help="relative = trackpad style, moves freely across all monitors; "
                          "absolute = hand position maps directly to selected monitor")
+    ap.add_argument("--backend", choices=["mediapipe", "intel"], default="mediapipe",
+                    help="mediapipe = CPU; intel = OpenVINO integrated GPU (requires intel extra)")
+    ap.add_argument("--stats", action="store_true", help="Print frame and inference timing")
     ap.add_argument("--gpu", action="store_true",
-                    help="Try GPU delegate (NVIDIA/AMD); falls back to CPU")
+                    help="Legacy MediaPipe GPU request; unsupported on Windows, falls back to CPU")
     ap.add_argument("--list", action="store_true",
                     help="List cameras and monitors then exit")
     args = ap.parse_args()
@@ -528,6 +452,9 @@ def main():
         for i, m in enumerate(sorted_monitors()):
             print(f"  {monitor_label(i, m)}")
         return
+
+    if args.width <= 0 or args.height <= 0 or args.fps <= 0:
+        ap.error("Camera width, height and FPS must be positive")
 
     if not args.camera:
         cameras = list_cameras()
@@ -547,53 +474,55 @@ def main():
     print(f"Hand:    {args.hand}   Sensitivity: {args.sensitivity:.1f}×   Scroll: {args.scroll_speed:.1f}×   Mode: {args.mode}")
     print("Starting — Ctrl+C to stop")
 
-    hands = build_hands(args.gpu)
-    cam  = FFmpegCamera(args.camera, args.width, args.height, args.fps)
+    if args.backend == "intel":
+        from handmouse_openvino import OpenVINOHands
+        hands = OpenVINOHands()
+    else:
+        hands = build_hands(args.gpu)
+    cam = None
     ctrl = MouseController(mon, args.width, args.height, args.mirror, args.sensitivity,
                            mode=args.mode, all_monitors=monitors,
                            scroll_speed=args.scroll_speed)
-
-    # wait for first frame
-    print("Waiting for camera...", end="", flush=True)
-    for _ in range(100):
-        ok, _ = cam.read()
-        if ok:
-            break
-        time.sleep(0.05)
-    else:
-        print("\nERROR: no frames. Check device name with --list")
-        cam.release()
-        sys.exit(1)
-    print(" ready!")
-
-    last_seq    = 0
-    no_hand_t   = None   # time when hand was last lost
-    _t0         = time.monotonic()  # reference for VIDEO-mode timestamps
-    BUTTON_RELEASE_GRACE = 0.6   # seconds before releasing held buttons after hand disappears
+    last_seq = 0
+    no_hand_t = None
+    _t0 = stats_start = time.monotonic()
+    stats_seq = stats_count = 0
+    infer_total = age_total = 0.0
+    BUTTON_RELEASE_GRACE = 0.6
     try:
+        cam = FFmpegCamera(args.camera, args.width, args.height, args.fps)
+        print(f"Processing frames: {cam.width}x{cam.height} (resized before Python)")
+        print("Waiting for camera...", end="", flush=True)
+        for _ in range(100):
+            stats_seq, frame, _ = cam.read_seq()
+            if frame is not None:
+                break
+            time.sleep(0.05)
+        else:
+            raise RuntimeError("No camera frames. Check device name with --list and Windows camera permissions.")
+        print(" ready!")
+        stats_start = time.monotonic()
         while True:
-            seq, frame = cam.read_seq()
+            seq, frame, received_at = cam.read_seq()
             if frame is None:
                 time.sleep(0.005)
                 continue
             if seq == last_seq:
+                if time.monotonic() - received_at > 2:
+                    raise RuntimeError("Camera stopped delivering frames")
                 time.sleep(0.003)
                 continue
             last_seq = seq
 
-            # Downscale to inference size before MediaPipe.
-            # MediaPipe was designed for ~640px; sending full 1080p frames wastes
-            # CPU and can crash due to its internal fixed-size buffers.
-            if args.width > INFER_W or args.height > INFER_H:
-                scale = min(INFER_W / args.width, INFER_H / args.height)
-                infer = cv2.resize(frame, (0, 0), fx=scale, fy=scale,
-                                   interpolation=cv2.INTER_LINEAR)
+            infer_start = time.monotonic()
+            if args.backend == "intel":
+                result = hands.detect(frame)
             else:
-                infer = frame
-            rgb = cv2.cvtColor(infer, cv2.COLOR_BGR2RGB)
-            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-            ts_ms = int((time.monotonic() - _t0) * 1000)
-            result = hands.detect_for_video(mp_image, ts_ms)
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+                ts_ms = int((time.monotonic() - _t0) * 1000)
+                result = hands.detect_for_video(mp_image, ts_ms)
+            infer_ms = (time.monotonic() - infer_start) * 1000
 
             lm_list, hand_label = pick_hand(result, args.hand, args.mirror)
 
@@ -612,7 +541,21 @@ def main():
                 elif now - no_hand_t >= BUTTON_RELEASE_GRACE:
                     ctrl.cleanup()
 
+            if args.stats:
+                stats_count += 1
+                infer_total += infer_ms
+                now = time.monotonic()
+                age_total += (now - received_at) * 1000
+                elapsed = now - stats_start
+                if elapsed >= 2:
+                    print(f"Timing: receive {(seq - stats_seq) / elapsed:.1f} fps | "
+                          f"inference {infer_total / stats_count:.1f} ms | "
+                          f"receive-to-control {age_total / stats_count:.1f} ms", flush=True)
+                    stats_start, stats_seq, stats_count = now, seq, 0
+                    infer_total = age_total = 0.0
+
             if args.show:
+                display_h, display_w = frame.shape[:2]
                 disp = frame.copy()
                 if args.mirror:
                     disp = cv2.flip(disp, 1)
@@ -626,12 +569,12 @@ def main():
                     color = (int(0 * alpha), int(255 * alpha), int(0 * alpha)) if chosen \
                             else (80, 80, 80)
                     for lk in hl:
-                        cx = int((1 - lk.x if args.mirror else lk.x) * args.width)
-                        cy = int(lk.y * args.height)
+                        cx = int((1 - lk.x if args.mirror else lk.x) * display_w)
+                        cy = int(lk.y * display_h)
                         cv2.circle(disp, (cx, cy), 4, color, -1)
                     wrist = hl[0]
-                    wx = int((1 - wrist.x if args.mirror else wrist.x) * args.width)
-                    wy = int(wrist.y * args.height) + 20
+                    wx = int((1 - wrist.x if args.mirror else wrist.x) * display_w)
+                    wy = int(wrist.y * display_h) + 20
                     cv2.putText(disp, f"{user} {cat.score:.0%}", (wx, wy),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
 
@@ -643,7 +586,8 @@ def main():
         print("\nStopped.")
     finally:
         ctrl.cleanup()
-        cam.release()
+        if cam is not None:
+            cam.release()
         hands.close()
         if args.show:
             cv2.destroyAllWindows()

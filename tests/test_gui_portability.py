@@ -51,7 +51,7 @@ class GuiPortabilityTests(unittest.TestCase):
         window._tracking_mode.return_value = "relative"
         window._mirror_var.get.return_value = False
         window._show_var.get.return_value = False
-        window._gpu_var.get.return_value = False
+        window._backend_var.get.return_value = "Intel integrated GPU (OpenVINO)"
         with patch.object(sys, "executable", "C:/custom environment/Scripts/pythonw.exe"):
             with patch.object(gui.subprocess, "Popen") as spawn:
                 with patch.object(gui.threading, "Thread"):
@@ -60,14 +60,18 @@ class GuiPortabilityTests(unittest.TestCase):
         self.assertEqual(command[:6], ["C:/custom environment/Scripts/python.exe", "-X", "utf8", "-u", "-m", "handmouse_win"])
         self.assertEqual(spawn.call_args.kwargs["encoding"], "utf-8")
         self.assertIn("--no-mirror", command)
+        self.assertEqual(command[command.index("--backend") + 1], "intel")
+        self.assertIn("--stats", command)
+        self.assertNotIn("--gpu", command)
         self.assertNotIn("cwd", spawn.call_args.kwargs)
 
     def test_settings_apply_without_any_camera(self):
         window = Mock()
         window._cameras = []
         window._monitors = ["0: primary"]
-        gui.HandmouseGUI._apply_settings(window, gui.DEFAULTS)
+        gui.HandmouseGUI._apply_settings(window, {**gui.DEFAULTS, "gpu": True})
         window._cam_var.set.assert_called_once_with("")
+        window._backend_var.set.assert_called_once_with("CPU (MediaPipe)")
         self.assertFalse(window._saving)
 
     def test_no_camera_does_not_launch_worker(self):

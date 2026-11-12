@@ -57,6 +57,44 @@ provides `handmouse-track` directly. The old `handmouse_win.bat` and
 system settings or creates a Desktop shortcut. Legacy relay scripts are not part
 of the installed application.
 
+## Intel integrated graphics and latency
+
+The default **CPU (MediaPipe)** backend still works without a GPU. For an
+OpenVINO-supported Intel integrated GPU, install/update the Intel graphics driver
+and enable the optional dependency:
+
+```powershell
+uv run --extra intel handmouse
+```
+
+Select **Inference device → Intel integrated GPU (OpenVINO)** in the GUI. It uses
+OpenVINO's actual integrated GPU, logs the device name, and does **not** silently
+fall back to CPU. A missing driver, unsupported GPU, or missing extra produces an
+error; select CPU to switch back. Old `gpu` settings are ignored rather than
+silently changing your inference backend.
+
+For your BRIO, start with low-overhead capture and timings:
+
+```powershell
+uv run --extra intel handmouse-track --backend intel --camera "Logitech BRIO" --width 640 --height 480 --fps 60 --hand right --no-mirror --stats
+```
+
+For a standalone tool install, use `uv tool install --python 3.11 --managed-python ".[intel]"`
+from the checkout. OpenVINO reuses the existing verified hand task model.
+
+Capture is now resized **inside FFmpeg, before the Python pipe**, preserving aspect
+ratio within 640×480. For 1080p/60 this reduces raw pipe traffic from ~373 MB/s to
+~41 MB/s. The reader retains only the latest complete frame. Capture resolution,
+gesture calibration, and mirror behavior are otherwise preserved; the preview
+uses the processing resolution.
+
+The GUI logs timing automatically; CLI users enable `--stats`. **Receive FPS**
+counts frames delivered by FFmpeg, **inference** measures the selected backend,
+and **receive-to-control** measures time from Python receiving a frame to updating
+the cursor. This does **not** measure camera/driver buffering or display latency.
+GPU inference is not guaranteed to be faster on every Intel GPU; compare both
+backends at the same capture settings. Real Windows/iGPU latency needs hardware testing.
+
 ## Gestures
 
 | Gesture | Action |
@@ -92,13 +130,15 @@ Settings survive upgrades and can be shared between source and tool installation
 | FPS | Camera frame rate |
 | Track hand | Any, left, or right |
 | Tracking mode | Relative (trackpad) or Absolute |
+| Inference device | CPU (MediaPipe) or Intel integrated GPU (OpenVINO, intel extra required) |
 | Sensitivity | Cursor movement per hand movement |
 | Scroll speed | Scroll movement multiplier |
 | Mirror | Flip horizontal movement to match your perspective |
 | Preview window | Show camera feed with landmark overlay |
 
-The standard MediaPipe Windows wheel runs on CPU+XNNPACK; selecting GPU may fall
-back to CPU. A GPU is not required.
+The standard MediaPipe Windows wheel runs on CPU+XNNPACK. The legacy CLI `--gpu`
+flag only requests its unsupported GPU delegate and falls back to CPU; use
+`--backend intel` for actual Intel GPU inference. A GPU is not required.
 
 ## Troubleshooting
 
@@ -119,12 +159,23 @@ back to CPU. A GPU is not required.
 ## Development checks
 
 ```powershell
-uv sync --locked --managed-python
-uv run python -m unittest discover -s tests -v
+uv sync --locked --extra intel --managed-python
+uv run --extra intel python -m unittest discover -s tests -v
 uv run python test_protocol.py
 uv build
 ```
 
 The Windows CI workflow checks Python 3.11/3.12, native dependency imports,
 bundled DirectShow support, unit tests, and wheel installation from outside the checkout.
-Real camera accuracy, latency, and overhead positioning still need manual testing.
+An opt-in model test runs OpenVINO CPU inference on a public reference image
+(requires internet; no GPU is needed). On Windows it also compares the output
+against MediaPipe; the native comparison is skipped on other platforms:
+
+```powershell
+$env:HANDMOUSE_OPENVINO_SMOKE = '1'
+uv run --extra intel python -m unittest discover -s tests -p test_openvino.py -v
+```
+
+Crop/projection geometry is adapted from OpenCV Zoo under Apache-2.0; see
+`licenses/opencv-zoo.txt`. Real camera accuracy, Intel GPU execution, latency,
+and overhead positioning still need manual testing.

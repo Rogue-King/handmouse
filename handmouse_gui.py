@@ -22,6 +22,7 @@ RESOLUTIONS = [
 FPS_OPTIONS  = ["15", "24", "30", "60"]
 HAND_OPTIONS = ["any", "left", "right"]
 MODE_OPTIONS = ["relative  (trackpad, all monitors)", "absolute  (maps hand to monitor)"]
+BACKEND_OPTIONS = {"CPU (MediaPipe)": "mediapipe", "Intel integrated GPU (OpenVINO)": "intel"}
 
 DEFAULTS = {
     "camera":       None,   # None = first detected
@@ -33,7 +34,7 @@ DEFAULTS = {
     "scroll_speed": 2.0,
     "mirror":       True,
     "show":         False,
-    "gpu":          False,
+    "backend":      "mediapipe",
     "mode":         MODE_OPTIONS[0],
 }
 
@@ -93,19 +94,6 @@ def list_monitors():
         return ["0:  (primary)"]
 
 
-def detect_gpu():
-    try:
-        r = subprocess.run(
-            ["wmic", "path", "win32_VideoController", "get", "Name"],
-            capture_output=True, text=True, timeout=5
-        )
-        text = r.stdout.upper()
-        if "NVIDIA" in text: return "NVIDIA"
-        if "AMD"    in text or "RADEON" in text: return "AMD"
-        if "INTEL"  in text: return "Intel"
-    except Exception:
-        pass
-    return None
 
 
 # ── main window ───────────────────────────────────────────────────────────────
@@ -265,9 +253,13 @@ class HandmouseGUI(tk.Tk):
         tk.Label(scf, text="×", font=("Segoe UI", 10),
                  bg=PANEL, fg=MUTED).pack(side="right")
 
+        self._backend_var = tk.StringVar()
+        lbl("Inference device", 8)
+        menu(card, list(BACKEND_OPTIONS), self._backend_var, 8)
+
         # Toggles
         tog = tk.Frame(card, bg=PANEL)
-        tog.grid(row=8, column=0, columnspan=2, sticky="ew", padx=10, pady=(4, 10))
+        tog.grid(row=9, column=0, columnspan=2, sticky="ew", padx=10, pady=(4, 10))
 
         def toggle(parent, text, var):
             return tk.Checkbutton(parent, text=text, variable=var,
@@ -277,15 +269,9 @@ class HandmouseGUI(tk.Tk):
 
         self._mirror_var = tk.BooleanVar()
         self._show_var   = tk.BooleanVar()
-        self._gpu_var    = tk.BooleanVar()
 
         toggle(tog, "Mirror",         self._mirror_var).pack(side="left", padx=8)
         toggle(tog, "Preview window", self._show_var  ).pack(side="left", padx=8)
-        self._gpu_cb = toggle(tog, "GPU accel", self._gpu_var)
-        self._gpu_cb.pack(side="left", padx=8)
-        self._gpu_badge = tk.Label(tog, text="(unavailable — pip mediapipe is CPU-only on Windows)",
-                                   font=("Segoe UI", 8), bg=PANEL, fg=MUTED)
-        self._gpu_badge.pack(side="left")
 
         # Refresh + Reset row
         btn_row = tk.Frame(self, bg=DARK)
@@ -363,7 +349,9 @@ class HandmouseGUI(tk.Tk):
 
             self._mirror_var.set(bool(s.get("mirror", DEFAULTS["mirror"])))
             self._show_var.set(bool(s.get("show",   DEFAULTS["show"])))
-            self._gpu_var.set(bool(s.get("gpu",     DEFAULTS["gpu"])))
+            backend = s.get("backend", DEFAULTS["backend"])
+            self._backend_var.set(next((label for label, value in BACKEND_OPTIONS.items()
+                                        if value == backend), "CPU (MediaPipe)"))
         finally:
             self._saving = False
 
@@ -380,7 +368,7 @@ class HandmouseGUI(tk.Tk):
             "mode":         self._mode_var.get(),
             "mirror":       self._mirror_var.get(),
             "show":         self._show_var.get(),
-            "gpu":          self._gpu_var.get(),
+            "backend":      BACKEND_OPTIONS[self._backend_var.get()],
         }
 
     def _save(self, *_):
@@ -393,7 +381,7 @@ class HandmouseGUI(tk.Tk):
         for var in (self._cam_var, self._mon_var, self._res_var,
                     self._fps_var, self._hand_var, self._mode_var,
                     self._sens_var, self._scroll_var,
-                    self._mirror_var, self._show_var, self._gpu_var):
+                    self._mirror_var, self._show_var, self._backend_var):
             var.trace_add("write", self._save)
 
     def _reset_defaults(self):
@@ -401,19 +389,7 @@ class HandmouseGUI(tk.Tk):
         save_settings(self._collect_settings())
         self._log_append("Settings reset to defaults.\n")
 
-    # ── GPU probe ─────────────────────────────────────────────────────────────
 
-    def _probe_gpu(self):
-        gpu = detect_gpu()
-        def _apply():
-            if gpu:
-                self._gpu_badge.config(text=f"({gpu} detected)")
-                # only override saved setting if this is a fresh run (no saved file)
-                if not os.path.exists(SETTINGS_FILE):
-                    self._gpu_var.set(True)
-            else:
-                self._gpu_badge.config(text="(no GPU found)")
-        self.after(0, _apply)
 
     # ── refresh ───────────────────────────────────────────────────────────────
 
@@ -483,10 +459,11 @@ class HandmouseGUI(tk.Tk):
             "--sensitivity",  f"{self._sens_var.get():.2f}",
             "--scroll-speed", f"{self._scroll_var.get():.2f}",
             "--mode",         self._tracking_mode(),
+            "--backend",      BACKEND_OPTIONS[self._backend_var.get()],
+            "--stats",
         ]
         cmd.append("--mirror" if self._mirror_var.get() else "--no-mirror")
         if self._show_var.get():   cmd.append("--show")
-        if self._gpu_var.get():    cmd.append("--gpu")
 
         self._log_append("$ " + " ".join(cmd[5:]) + "\n")
         try:
